@@ -1,10 +1,11 @@
 services:
   monitor:
+    image: pumpfun-portal-monitor:v1
+    container_name: pumpfun-portal-monitor # Nome fixo para o container (opcional)
     # Instrui o Compose a construir a imagem usando o Dockerfile no diretório atual (.)
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: pumpfun-monitor-app # Nome fixo para o container (opcional)
     # Monta o volume nomeado 'pumpportal_data' no diretório /data dentro do container
     # Isso garante que os logs e arquivos JSON persistam entre as reinicializações do container
     volumes:
@@ -13,7 +14,8 @@ services:
     # O arquivo .env deve estar no mesmo diretório que o docker-compose.yml
     env_file:
       - .env
-      - TZ=Europe/London
+    environment:
+      - TZ=Europe/Lisbon
     # Política de reinicialização: sempre reinicia se parar, a menos que seja parado manualmente
     restart: unless-stopped
     # Configuração opcional de logging para limitar o tamanho dos arquivos de log do Docker

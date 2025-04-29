@@ -1,7 +1,5 @@
-# pumpportal_monitor/utils.py
-
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -9,9 +7,13 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
     """Formata os dados da API de análise em um resumo legível."""
 
     if not api_data or api_data.get("status") != "success":
-        return f"[{mint}] Não foi possível obter dados detalhados da API."
+        # Retorna mensagem indicando falha na obtenção dos dados
+        reason = api_data.get('reason', 'Status não foi success')
+        return f"[{mint}] Análise Indisponível (Status: {api_data.get('status', 'N/A')}, Razão: {reason})"
 
     data = api_data.get("raw_data", {})
+    if not data: # Se raw_data estiver vazio por algum motivo
+         return f"[{mint}] Análise Indisponível (Dados brutos da API vazios)"
 
     # --- Extração Segura de Dados ---
     token_info = data.get("token", {}) or {}
@@ -28,27 +30,27 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
         logger.warning(f"[{mint}] Decimals inválidos recebidos: {decimals}. Usando 0.")
         decimals = 0
 
-    supply_raw = token_info.get("supply") # Não definir default 0 aqui
+    supply_raw = token_info.get("supply")
     supply_ui = None
     market_cap_usd = None
-    price_usd = data.get("price") # Assumindo que 'price' é USD
+    price_usd = data.get("price") # Preço do RugCheck
 
     if isinstance(supply_raw, (int, float)) and supply_raw >= 0:
         try:
             supply_ui = float(supply_raw) / (10**decimals)
-            # --- Cálculo do Market Cap ---
             if price_usd is not None and isinstance(price_usd, (int, float)) and price_usd >= 0:
                  market_cap_usd = price_usd * supply_ui
-            # --- Fim do Cálculo ---
         except (ValueError, TypeError, OverflowError) as e:
-            logger.warning(f"[{mint}] Erro ao calcular supply UI ou Market Cap: {e}")
-            if isinstance(supply_raw, (int, float)): supply_ui = supply_raw # fallback para raw se UI falhar
+            logger.warning(f"[{mint}] Erro ao calcular supply UI ou Market Cap (RugCheck data): {e}")
+            if isinstance(supply_raw, (int, float)): supply_ui = supply_raw
 
     mint_authority = data.get("mintAuthority", "Erro ao ler")
     freeze_authority = data.get("freezeAuthority", "Erro ao ler")
-    is_mutable = token_meta.get("mutable", "N/A")
+    is_mutable = token_meta.get("mutable", None) # Usar None para indicar desconhecido
     risks = data.get("risks", []) or []
-    score = data.get("score", "N/A")
+    # --- USA score_normalised ---
+    score_display = data.get("score_normalised") # Pega o normalizado
+    # --- FIM CORREÇÃO ---
     rugged = data.get("rugged", None)
     total_liquidity_usd = data.get("totalMarketLiquidity")
     total_holders_count = data.get("totalHolders", "N/A")
@@ -60,7 +62,7 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
             creator_balance_ui = float(creator_balance_raw) / (10**decimals)
         except (ValueError, TypeError, OverflowError):
             logger.warning(f"[{mint}] Não foi possível calcular o UI amount para o saldo do criador: {creator_balance_raw}")
-            creator_balance_ui = -1
+            creator_balance_ui = -1 # Flag para indicar erro
 
     lp_locked_pct = 0
     lp_pool_address = None
@@ -107,67 +109,67 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
 
     # --- Montagem do Output ---
     output = [f"--- Análise Rápida do Token [{symbol}] ({mint}) ---"]
+
+    # Formata o score normalizado para exibição
+    score_str = f"{score_display:.2f}" if isinstance(score_display, (int, float)) else "N/A"
+
     output.append("\n**Avaliação de Risco (RugCheck API):**")
     if rugged is True:
-        output.append(f"  🔴 ALERTA: API marcou como RUGGED!")
+        output.append(f"  🔴 ALERTA: API marcou como RUGGED! (Score Norm: {score_str})")
+    # Condição para 'Baixo Risco' - Sem riscos E autoridades renunciadas E LP bloqueada
     elif not risks and mint_authority is None and freeze_authority is None and lp_locked_pct == 100:
-        output.append(f"  ✅ Baixo Risco Técnico Imediato (Score: {score if score is not None else 'N/A'})")
+        output.append(f"  ✅ Baixo Risco Técnico Imediato (Score Norm: {score_str})")
     else:
-        output.append(f"  ⚠️ Risco Indeterminado/Moderado (Score: {score if score is not None else 'N/A'}, Rugged: {rugged}) - Revisar detalhes abaixo.")
+        # Qualquer outra combinação é 'Indeterminado/Moderado'
+        output.append(f"  ⚠️ Risco Indeterminado/Moderado (Score Norm: {score_str}, Rugged: {rugged}) - Revisar detalhes.")
 
     output.append("\n**Checagens de Segurança:**")
-    output.append(f"  - Mint Renunciado (Não pode criar mais): {'✅ Sim' if mint_authority is None else '❌ NÃO' if mint_authority else '❔ Desconhecido'}")
-    output.append(f"  - Freeze Renunciado (Não pode congelar): {'✅ Sim' if freeze_authority is None else '❌ NÃO' if freeze_authority else '❔ Desconhecido'}")
-    output.append(f"  - Liquidez Inicial (Pump.fun) Bloqueada: {'✅ Sim (100%)' if lp_locked_pct == 100 else f'⚠️ {lp_locked_pct}%' if isinstance(lp_locked_pct, (int, float)) and lp_locked_pct > 0 else '❌ Não ou Indisponível'}")
+    output.append(f"  - Mint Renunciado: {'✅ Sim' if mint_authority is None else '❌ NÃO' if mint_authority else '❔ Desc.'}")
+    output.append(f"  - Freeze Renunciado: {'✅ Sim' if freeze_authority is None else '❌ NÃO' if freeze_authority else '❔ Desc.'}")
+    output.append(f"  - Liquidez Inicial Bloqueada: {'✅ Sim (100%)' if lp_locked_pct == 100 else f'⚠️ {lp_locked_pct:.1f}%' if isinstance(lp_locked_pct, (int, float)) and lp_locked_pct >= 0 else '❌ Não/Indisponível'}")
     if risks and isinstance(risks, list):
-        risk_descriptions = [
-            str(risk.get('type', risk.get('name', 'Detalhe Indisponível')))
-            if isinstance(risk, dict) else str(risk)
-            for risk in risks
-        ]
-        output.append(f"  - Riscos de Contrato Detectados (API): ❌ Sim: {', '.join(risk_descriptions)}")
+        risk_descriptions = [str(risk.get('type', risk.get('name', 'Detalhe Indisp.'))) if isinstance(risk, dict) else str(risk) for risk in risks]
+        output.append(f"  - Riscos Detectados (API): ❌ Sim: {', '.join(risk_descriptions)}")
     else:
-        output.append(f"  - Riscos de Contrato Detectados (API): ✅ Nenhum")
-    output.append(f"  - Metadados Mutáveis (Nome/Símbolo): {'⚠️ Sim' if is_mutable is True else '✅ Não' if is_mutable is False else '❔ Desconhecido'}")
+        output.append(f"  - Riscos Detectados (API): ✅ Nenhum")
+    output.append(f"  - Metadados Mutáveis: {'⚠️ Sim' if is_mutable is True else '✅ Não' if is_mutable is False else '❔ Desc.'}")
 
-    output.append("\n**Características:**")
+    output.append("\n**Características (Dados RugCheck):**")
     output.append(f"  - Nome: {name}")
     output.append(f"  - Criador: {creator}")
     if supply_ui is not None:
          try:
-           supply_formatted = f"{supply_ui:,.{decimals}f} {symbol}"
+           supply_formatted = f"{supply_ui:,.{decimals}f} {symbol}" if decimals > 0 else f"{int(supply_ui):,} {symbol}"
          except ValueError:
-             supply_formatted = f"{supply_ui} {symbol}"
+             supply_formatted = f"{supply_ui} {symbol}" # Fallback
          output.append(f"  - Supply Total: {supply_formatted}")
     else:
          output.append(f"  - Supply Total: N/A")
 
-    # --- ADICIONADO: Exibição do Market Cap ---
     if market_cap_usd is not None:
-        output.append(f"  - Market Cap (Total Supply, USD Aprox.): ${market_cap_usd:,.2f}")
+        output.append(f"  - Market Cap (Est.): ${market_cap_usd:,.2f}")
     else:
-        output.append(f"  - Market Cap (Total Supply, USD Aprox.): N/A (Preço ou Supply indisponível)")
-    # --- FIM DA ADIÇÃO ---
+        output.append(f"  - Market Cap (Est.): N/A")
 
-    output.append(f"  - Liquidez Total (USD Aprox.): ${total_liquidity_usd:,.2f}" if total_liquidity_usd is not None and isinstance(total_liquidity_usd, (int, float)) else "  - Liquidez Total (USD Aprox.): N/A")
+    output.append(f"  - Liquidez (Est.): ${total_liquidity_usd:,.2f}" if total_liquidity_usd is not None and isinstance(total_liquidity_usd, (int, float)) else "  - Liquidez (Est.): N/A")
     output.append(f"  - Total de Holders: {total_holders_count}")
 
     output.append("\n**Pontos de Atenção:**")
-    output.append(f"  - Concentração (Top {num_holders_to_sum} Holders ex-LP/Criador): {holder_concentration_pct:.2f}% ({', '.join(top_non_lp_holders)})")
+    output.append(f"  - Concentração (Top {num_holders_to_sum} ex-LP/Criador): {holder_concentration_pct:.2f}% ({', '.join(top_non_lp_holders)})")
     if holder_concentration_pct > 50:
-         output.append("    -> ⚠️ ALTA concentração, risco de 'dump' por grandes holders.")
+         output.append("    -> ⚠️ ALTA concentração.")
     if total_liquidity_usd is not None and isinstance(total_liquidity_usd, (int, float)) and total_liquidity_usd < 10000:
-         output.append(f"    -> ⚠️ BAIXA liquidez (${total_liquidity_usd:,.2f}), alto risco de volatilidade/slippage.")
+         output.append(f"    -> ⚠️ BAIXA liquidez (${total_liquidity_usd:,.2f}).")
     if creator_balance_ui > 0:
          try:
-             balance_formatted = f"{creator_balance_ui:,.{decimals}f}"
+             balance_formatted = f"{creator_balance_ui:,.{decimals}f}" if decimals > 0 else f"{int(creator_balance_ui):,}"
          except ValueError:
              balance_formatted = str(creator_balance_ui)
-         output.append(f"    -> ⚠️ SALDO DO CRIADOR DETECTADO: {balance_formatted} {symbol}")
-    elif creator_balance_ui == -1:
-         output.append(f"    -> ⚠️ SALDO DO CRIADOR DETECTADO (RAW): {creator_balance_raw} (smallest units)")
+         output.append(f"    -> ⚠️ SALDO CRIADOR: {balance_formatted} {symbol}")
+    elif creator_balance_ui == -1: # Indica erro no cálculo UI, mostra raw
+         output.append(f"    -> ⚠️ SALDO CRIADOR (RAW): {creator_balance_raw}")
 
-    output.append("\n*Nota: Esta é uma análise técnica automatizada baseada em dados da API no momento da consulta. Não é conselho financeiro.*")
+    output.append("\n*Nota: Análise técnica automatizada. Não é conselho financeiro.*")
     output.append("--------------------------------------------------")
 
     return "\n".join(output)
