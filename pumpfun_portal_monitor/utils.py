@@ -1,5 +1,7 @@
+# pumpportal_monitor/utils.py
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Set, List # Add Set, List
+from . import config # Import config para usar os limites nos logs
 
 logger = logging.getLogger(__name__)
 
@@ -7,12 +9,11 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
     """Formata os dados da API de análise em um resumo legível."""
 
     if not api_data or api_data.get("status") != "success":
-        # Retorna mensagem indicando falha na obtenção dos dados
         reason = api_data.get('reason', 'Status não foi success')
         return f"[{mint}] Análise Indisponível (Status: {api_data.get('status', 'N/A')}, Razão: {reason})"
 
     data = api_data.get("raw_data", {})
-    if not data: # Se raw_data estiver vazio por algum motivo
+    if not data:
          return f"[{mint}] Análise Indisponível (Dados brutos da API vazios)"
 
     # --- Extração Segura de Dados ---
@@ -26,14 +27,12 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
     symbol = token_meta.get("symbol") or file_meta.get("symbol", "N/A")
     creator = data.get("creator", "N/A")
     decimals = token_info.get("decimals", 0)
-    if not isinstance(decimals, int) or decimals < 0:
-        logger.warning(f"[{mint}] Decimals inválidos recebidos: {decimals}. Usando 0.")
-        decimals = 0
+    if not isinstance(decimals, int) or decimals < 0: decimals = 0
 
     supply_raw = token_info.get("supply")
     supply_ui = None
     market_cap_usd = None
-    price_usd = data.get("price") # Preço do RugCheck
+    price_usd = data.get("price")
 
     if isinstance(supply_raw, (int, float)) and supply_raw >= 0:
         try:
@@ -46,48 +45,46 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
 
     mint_authority = data.get("mintAuthority", "Erro ao ler")
     freeze_authority = data.get("freezeAuthority", "Erro ao ler")
-    is_mutable = token_meta.get("mutable", None) # Usar None para indicar desconhecido
+    is_mutable = token_meta.get("mutable", None)
     risks = data.get("risks", []) or []
-    # --- USA score_normalised ---
-    score_display = data.get("score_normalised") # Pega o normalizado
-    # --- FIM CORREÇÃO ---
+    score_display = data.get("score_normalised")
     rugged = data.get("rugged", None)
     total_liquidity_usd = data.get("totalMarketLiquidity")
     total_holders_count = data.get("totalHolders", "N/A")
 
     creator_balance_raw = data.get("creatorBalance", 0)
     creator_balance_ui = 0.0
+    creator_holding_pct_calculated = 0.0 # Calcular aqui também para display
     if isinstance(creator_balance_raw, (int, float)) and creator_balance_raw > 0:
         try:
             creator_balance_ui = float(creator_balance_raw) / (10**decimals)
+            if isinstance(token_supply_raw, (int, float)) and token_supply_raw > 0:
+                creator_holding_pct_calculated = (creator_balance_raw / token_supply_raw) * 100
         except (ValueError, TypeError, OverflowError):
-            logger.warning(f"[{mint}] Não foi possível calcular o UI amount para o saldo do criador: {creator_balance_raw}")
-            creator_balance_ui = -1 # Flag para indicar erro
+            creator_balance_ui = -1
 
     lp_locked_pct = 0
     lp_pool_address = None
+    owner_of_lp_pool_address = None # Inicializa
     if markets and isinstance(markets, list) and len(markets) > 0 and markets[0].get("marketType") == "pump_fun":
         lp_info = markets[0].get("lp", {}) or {}
         lp_locked_pct = lp_info.get("lpLockedPct", 0)
         lp_pool_address = markets[0].get("liquidityA")
+        owner_of_lp_pool_address = (markets[0].get("liquidityAAccount", {}) or {}).get("owner") # Pega o owner do pool
 
+    # --- NOVOS CÁLCULOS PARA DISPLAY ---
+    # Concentração e Holder Único
     holder_concentration_pct = 0.0
     top_non_lp_holders = []
+    max_single_holder_pct_found = 0.0
     known_accounts = data.get("knownAccounts", {}) or {}
     creator_address_from_known = None
     amm_addresses_from_known = set()
     for addr, info in known_accounts.items():
-        if info.get("type") == "CREATOR":
-            creator_address_from_known = addr
-        elif info.get("type") == "AMM":
-            amm_addresses_from_known.add(addr)
-
-    if lp_pool_address and lp_pool_address not in amm_addresses_from_known:
-         amm_addresses_from_known.add(lp_pool_address)
-         liquidity_a_account = (markets[0].get("liquidityAAccount", {}) or {}) if markets else {}
-         owner_of_lp_pool_address = liquidity_a_account.get("owner")
-         if owner_of_lp_pool_address and owner_of_lp_pool_address not in amm_addresses_from_known:
-              amm_addresses_from_known.add(owner_of_lp_pool_address)
+        if info.get("type") == "CREATOR": creator_address_from_known = addr
+        elif info.get("type") == "AMM": amm_addresses_from_known.add(addr)
+    if lp_pool_address: amm_addresses_from_known.add(lp_pool_address)
+    if owner_of_lp_pool_address: amm_addresses_from_known.add(owner_of_lp_pool_address) # Adiciona owner tbm
 
     num_holders_to_sum = 5
     holders_summed = 0
@@ -95,32 +92,32 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
         for holder in top_holders:
             holder_addr = holder.get("address")
             if holder_addr in amm_addresses_from_known or holder_addr == creator or holder_addr == creator_address_from_known:
-                continue
-            if holders_summed < num_holders_to_sum:
-                holder_pct = holder.get("pct", 0.0)
-                try:
-                    holder_concentration_pct += float(holder_pct)
-                except (ValueError, TypeError):
-                    pass
-                top_non_lp_holders.append(f"{float(holder_pct):.2f}%" if isinstance(holder_pct, (int, float)) else "N/A")
-                holders_summed += 1
-            else:
-                break
+                continue # Pula LP e Criador
+            try:
+                current_pct = float(holder.get("pct", 0.0))
+                max_single_holder_pct_found = max(max_single_holder_pct_found, current_pct) # Atualiza max
+                if holders_summed < num_holders_to_sum:
+                    holder_concentration_pct += current_pct
+                    top_non_lp_holders.append(f"{current_pct:.2f}%")
+                    holders_summed += 1
+            except (ValueError, TypeError): pass
+
+    # Insiders Detectados
+    insiders_detected = data.get("graphInsidersDetected", 0)
+    # --- FIM NOVOS CÁLCULOS ---
+
 
     # --- Montagem do Output ---
     output = [f"--- Análise Rápida do Token [{symbol}] ({mint}) ---"]
 
-    # Formata o score normalizado para exibição
     score_str = f"{score_display:.2f}" if isinstance(score_display, (int, float)) else "N/A"
 
     output.append("\n**Avaliação de Risco (RugCheck API):**")
     if rugged is True:
         output.append(f"  🔴 ALERTA: API marcou como RUGGED! (Score Norm: {score_str})")
-    # Condição para 'Baixo Risco' - Sem riscos E autoridades renunciadas E LP bloqueada
     elif not risks and mint_authority is None and freeze_authority is None and lp_locked_pct == 100:
         output.append(f"  ✅ Baixo Risco Técnico Imediato (Score Norm: {score_str})")
     else:
-        # Qualquer outra combinação é 'Indeterminado/Moderado'
         output.append(f"  ⚠️ Risco Indeterminado/Moderado (Score Norm: {score_str}, Rugged: {rugged}) - Revisar detalhes.")
 
     output.append("\n**Checagens de Segurança:**")
@@ -140,34 +137,29 @@ def format_analysis_output(mint: str, api_data: Dict[str, Any]) -> str:
     if supply_ui is not None:
          try:
            supply_formatted = f"{supply_ui:,.{decimals}f} {symbol}" if decimals > 0 else f"{int(supply_ui):,} {symbol}"
-         except ValueError:
-             supply_formatted = f"{supply_ui} {symbol}" # Fallback
+         except ValueError: supply_formatted = f"{supply_ui} {symbol}"
          output.append(f"  - Supply Total: {supply_formatted}")
-    else:
-         output.append(f"  - Supply Total: N/A")
-
-    if market_cap_usd is not None:
-        output.append(f"  - Market Cap (Est.): ${market_cap_usd:,.2f}")
-    else:
-        output.append(f"  - Market Cap (Est.): N/A")
-
+    else: output.append(f"  - Supply Total: N/A")
+    if market_cap_usd is not None: output.append(f"  - Market Cap (Est.): ${market_cap_usd:,.2f}")
+    else: output.append(f"  - Market Cap (Est.): N/A")
     output.append(f"  - Liquidez (Est.): ${total_liquidity_usd:,.2f}" if total_liquidity_usd is not None and isinstance(total_liquidity_usd, (int, float)) else "  - Liquidez (Est.): N/A")
     output.append(f"  - Total de Holders: {total_holders_count}")
 
     output.append("\n**Pontos de Atenção:**")
     output.append(f"  - Concentração (Top {num_holders_to_sum} ex-LP/Criador): {holder_concentration_pct:.2f}% ({', '.join(top_non_lp_holders)})")
-    if holder_concentration_pct > 50:
-         output.append("    -> ⚠️ ALTA concentração.")
+    # --- ADICIONADO: Display do Holder Único e Insiders ---
+    single_holder_warning = "⚠️" if max_single_holder_pct_found > config.FILTER_MAX_SINGLE_HOLDER_PCT else "✅"
+    output.append(f"  - Maior Holder Único (ex-LP/Criador): {single_holder_warning} {max_single_holder_pct_found:.2f}% (Limite: {config.FILTER_MAX_SINGLE_HOLDER_PCT}%)")
+    insider_warning = "⚠️" if insiders_detected > config.FILTER_MAX_INSIDERS_DETECTED else "✅"
+    output.append(f"  - Insiders Detectados (API): {insider_warning} {insiders_detected} (Limite: {config.FILTER_MAX_INSIDERS_DETECTED})")
+    # --- FIM DA ADIÇÃO ---
     if total_liquidity_usd is not None and isinstance(total_liquidity_usd, (int, float)) and total_liquidity_usd < 10000:
          output.append(f"    -> ⚠️ BAIXA liquidez (${total_liquidity_usd:,.2f}).")
-    if creator_balance_ui > 0:
-         try:
-             balance_formatted = f"{creator_balance_ui:,.{decimals}f}" if decimals > 0 else f"{int(creator_balance_ui):,}"
-         except ValueError:
-             balance_formatted = str(creator_balance_ui)
-         output.append(f"    -> ⚠️ SALDO CRIADOR: {balance_formatted} {symbol}")
-    elif creator_balance_ui == -1: # Indica erro no cálculo UI, mostra raw
-         output.append(f"    -> ⚠️ SALDO CRIADOR (RAW): {creator_balance_raw}")
+    if creator_balance_ui == -1: # Erro no cálculo, mostra raw
+         output.append(f"    -> ⚠️ SALDO CRIADOR (RAW): {creator_balance_raw} (Limite: {config.FILTER_MAX_CREATOR_HOLDING_PCT}%)")
+    elif creator_holding_pct_calculated > config.FILTER_MAX_CREATOR_HOLDING_PCT: # Mostra se excede o limite
+         output.append(f"    -> ⚠️ SALDO CRIADOR: {creator_holding_pct_calculated:.2f}% (Limite: {config.FILTER_MAX_CREATOR_HOLDING_PCT}%)")
+    # Se saldo for 0 ou dentro do limite, não loga nada aqui para não poluir
 
     output.append("\n*Nota: Análise técnica automatizada. Não é conselho financeiro.*")
     output.append("--------------------------------------------------")
