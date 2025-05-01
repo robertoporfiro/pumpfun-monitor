@@ -15,7 +15,7 @@ services:
     env_file:
       - .env
     environment:
-      - TZ=Europe/Lisbon
+      - TZ=Europe/Lisbon # UTC+1
     # Política de reinicialização: sempre reinicia se parar, a menos que seja parado manualmente
     restart: unless-stopped
     # Configuração opcional de logging para limitar o tamanho dos arquivos de log do Docker

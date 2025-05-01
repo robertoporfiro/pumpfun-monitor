@@ -2,14 +2,14 @@
 import asyncio
 import logging
 import signal
-import time
+import time # Manter import time se usado em outro lugar, mas não para gmtime
 import sys
 import os
 import json
 
 import aiohttp
 
-from . import config # Importa o config.py atualizado
+from . import config
 from .state_manager import StateManager
 from .websocket_client import run_websocket_client
 
@@ -25,13 +25,17 @@ logging.basicConfig(
         logging.FileHandler(config.LOG_FILE),
         logging.StreamHandler(sys.stdout)
     ]
+    # A linha abaixo foi removida para usar o timezone do container
+    # logging.Formatter.converter = time.gmtime
 )
-logging.Formatter.converter = time.gmtime
-logger = logging.getLogger("pumpportal_monitor") # Logger principal
+# --- FIM DA ALTERAÇÃO ---
+
+logger = logging.getLogger("pumpportal_monitor")
 
 # Definir níveis de log para bibliotecas externas
 logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
+
 
 _state_manager_instance: StateManager = None
 _shutdown_requested = False
@@ -41,9 +45,9 @@ async def main():
     global _state_manager_instance, _shutdown_requested
 
     # Chama a função para logar a configuração inicial
-    config.log_initial_config() # Loga as configs APÓS basicConfig
+    config.log_initial_config()
 
-    logger.info(f"Iniciando monitor (Nível de Log Efetivo: {logging.getLevelName(logger.getEffectiveLevel())})...")
+    logger.info(f"Iniciando monitor (Nível Log: {config.LOG_LEVEL_NAME}, Timezone Container: {os.getenv('TZ', 'Default')})...")
 
     _state_manager_instance = StateManager(config.PROCESSED_TOKENS_FILE, config.PENDING_TOKENS_FILE)
     _state_manager_instance.load_state()
@@ -63,7 +67,7 @@ async def main():
         done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
 
         if not _shutdown_requested:
-             logger.error("O loop principal terminou inesperadamente. Verificando exceções...")
+             logger.error("Loop principal terminou inesperadamente. Verificando exceções...")
 
         for task in done:
             task_name = task.get_name()
@@ -71,8 +75,8 @@ async def main():
                 exc = task.exception()
                 if exc: logger.error(f"Tarefa '{task_name}' finalizada com erro:", exc_info=exc)
                 else: logger.info(f"Tarefa '{task_name}' finalizada sem erros.")
-            except asyncio.CancelledError: logger.info(f"Tarefa '{task_name}' foi cancelada durante o wait.")
-            except Exception as e: logger.error(f"Erro ao verificar status da tarefa concluída '{task_name}': {e}", exc_info=True)
+            except asyncio.CancelledError: logger.info(f"Tarefa '{task_name}' foi cancelada durante wait.")
+            except Exception as e: logger.error(f"Erro ao verificar status tarefa concluída '{task_name}': {e}", exc_info=True)
 
         if pending:
             logger.info("Cancelando tarefas pendentes...")
@@ -82,18 +86,16 @@ async def main():
                     task.cancel()
                     try: await asyncio.wait_for(task, timeout=2.0)
                     except asyncio.CancelledError: logger.debug(f"Tarefa pendente '{task_name}' cancelada.")
-                    except asyncio.TimeoutError: logger.warning(f"Timeout ao esperar cancelamento da tarefa '{task_name}'.")
-                    except Exception as e: logger.error(f"Erro durante cancelamento da tarefa '{task_name}': {e}", exc_info=True)
+                    except asyncio.TimeoutError: logger.warning(f"Timeout ao esperar cancelamento tarefa '{task_name}'.")
+                    except Exception as e: logger.error(f"Erro durante cancelamento tarefa '{task_name}': {e}", exc_info=True)
 
-# --- shutdown_handler (sem alterações da última versão) ---
+# --- shutdown_handler (sem alterações) ---
 def shutdown_handler(signum, frame):
     """Handler de sinal para encerramento gracioso."""
     global _shutdown_requested, _state_manager_instance
-    if _shutdown_requested:
-        logger.debug("Shutdown já em progresso.")
-        return
+    if _shutdown_requested: logger.debug("Shutdown já em progresso."); return
     _shutdown_requested = True
-    logger.warning(f"Sinal {signal.Signals(signum).name} recebido. Iniciando encerramento gracioso...")
+    logger.warning(f"Sinal {signal.Signals(signum).name} recebido. Iniciando encerramento...")
 
     if _state_manager_instance and not _state_manager_instance.is_final_save_done():
         logger.info("Salvando estado final (handler)...")
@@ -104,11 +106,11 @@ def shutdown_handler(signum, frame):
             pending_file = config.PENDING_TOKENS_FILE
             with open(processed_file, "w") as f: json.dump(processed_list, f, indent=2)
             with open(pending_file, "w") as f: json.dump(pending_list, f, indent=2)
-            logger.info(f"Salvamento final (handler) OK. Processados: {len(processed_list)}, Pendentes: {len(pending_list)}")
+            logger.info(f"Salvamento final (handler) OK. Proc: {len(processed_list)}, Pend: {len(pending_list)}")
             _state_manager_instance.mark_final_save_done()
-        except Exception as e: logger.error(f"Erro no salvamento final (handler): {e}", exc_info=True)
+        except Exception as e: logger.error(f"Erro salvamento final (handler): {e}", exc_info=True)
     elif _state_manager_instance and _state_manager_instance.is_final_save_done(): logger.debug("Salvamento final (handler) já realizado.")
-    else: logger.warning("StateManager indisponível no handler, não foi possível salvar estado.")
+    else: logger.warning("StateManager indisponível no handler, não salvou estado.")
 
     try:
         loop = asyncio.get_running_loop()
@@ -121,9 +123,7 @@ def shutdown_handler(signum, frame):
                 await asyncio.gather(*tasks, return_exceptions=True)
                 logger.debug("Gather de cancelamento concluído.")
             else: logger.info("Nenhuma tarefa pendente para cancelar.")
-            if loop.is_running():
-                logger.info("Enviando comando loop.stop().")
-                loop.stop()
+            if loop.is_running(): logger.info("Enviando comando loop.stop()."); loop.stop()
             else: logger.info("Loop não estava rodando ao tentar parar.")
         loop.call_soon_threadsafe(asyncio.ensure_future, stop_loop_and_tasks())
     except RuntimeError: logger.error("Nenhum loop de eventos ativo no shutdown handler.")
@@ -136,5 +136,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, asyncio.CancelledError): logger.info("Programa interrompido/cancelado.")
     except SystemExit as e: logger.error(f"Encerrando devido a erro: {e}")
-    except Exception as e: logger.critical(f"Erro fatal não capturado no loop principal: {e}", exc_info=True)
+    except Exception as e: logger.critical(f"Erro fatal não capturado: {e}", exc_info=True)
     finally: logger.info("Processo de monitoramento formalmente encerrado.")
