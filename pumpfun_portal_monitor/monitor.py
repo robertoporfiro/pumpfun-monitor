@@ -2,139 +2,124 @@
 import asyncio
 import logging
 import signal
-import time # Manter import time se usado em outro lugar, mas não para gmtime
+import time
 import sys
 import os
 import json
+import atexit
 
 import aiohttp
 
+# Usa imports relativos corretos
 from . import config
-from .state_manager import StateManager
+from .state_manager import StateManager # Importa a classe com __init__ de 3 args
 from .websocket_client import run_websocket_client
 
-# --- Garante que DATA_DIR exista ANTES de configurar logging ---
-os.makedirs(config.DATA_DIR, exist_ok=True)
+# --- Garante que DATA_DIR exista ---
+try: os.makedirs(config.DATA_DIR, exist_ok=True)
+except OSError as e: print(f"FATAL: Criar {config.DATA_DIR} falhou: {e}", file=sys.stderr); sys.exit(1)
 
 # --- Configuração de Logging ---
 log_level_to_set = getattr(logging, config.LOG_LEVEL_NAME, logging.INFO)
+for handler in logging.root.handlers[:]: logging.root.removeHandler(handler) # Limpa handlers
 logging.basicConfig(
-    level=log_level_to_set,
-    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
-    handlers=[
-        logging.FileHandler(config.LOG_FILE),
-        logging.StreamHandler(sys.stdout)
-    ]
-    # A linha abaixo foi removida para usar o timezone do container
-    # logging.Formatter.converter = time.gmtime
+    level=log_level_to_set, format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
+    handlers=[ logging.FileHandler(config.LOG_FILE), logging.StreamHandler(sys.stdout) ]
+    # Sem converter gmtime
 )
-# --- FIM DA ALTERAÇÃO ---
-
 logger = logging.getLogger("pumpportal_monitor")
-
-# Definir níveis de log para bibliotecas externas
-logging.getLogger("websockets").setLevel(logging.WARNING)
-logging.getLogger("aiohttp").setLevel(logging.WARNING)
-
+logging.getLogger("websockets").setLevel(logging.WARNING); logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 _state_manager_instance: StateManager = None
 _shutdown_requested = False
+_pid_file_path = None # Definido em config.PID_FILE
+
+def remove_pid_file():
+    """Tenta remover o ficheiro PID."""
+    global _pid_file_path
+    # Garante que _pid_file_path foi definido antes de usar
+    if _pid_file_path and os.path.exists(_pid_file_path):
+        try:
+            logger.info(f"Removendo ficheiro PID: {_pid_file_path}")
+            os.remove(_pid_file_path)
+            _pid_file_path = None # Reset para evitar tentativas repetidas
+        except OSError as e:
+            logger.error(f"Erro ao remover ficheiro PID {_pid_file_path}: {e}")
 
 async def main():
-    """Função principal assíncrona."""
-    global _state_manager_instance, _shutdown_requested
+    global _state_manager_instance, _shutdown_requested, _pid_file_path
+    _pid_file_path = config.PID_FILE # Define o path do PID file
 
-    # Chama a função para logar a configuração inicial
-    config.log_initial_config()
+    # --- Escrever PID File ---
+    try:
+        pid = os.getpid(); os.makedirs(os.path.dirname(_pid_file_path), exist_ok=True)
+        with open(_pid_file_path, "w") as f: f.write(str(pid))
+        logger.info(f"PID File: {_pid_file_path} (PID: {pid})")
+        atexit.register(remove_pid_file) # Registra para remoção na saída
+    except Exception as e: logger.error(f"Não criou PID file {_pid_file_path}: {e}")
 
-    logger.info(f"Iniciando monitor (Nível Log: {config.LOG_LEVEL_NAME}, Timezone Container: {os.getenv('TZ', 'Default')})...")
+    try: config.log_initial_config()
+    except Exception as e: logger.error(f"Erro log config: {e}")
+    logger.info(f"Iniciando monitor (Log: {config.LOG_LEVEL_NAME}, TZ: {os.getenv('TZ', 'Default')})...")
 
-    _state_manager_instance = StateManager(config.PROCESSED_TOKENS_FILE, config.PENDING_TOKENS_FILE)
-    _state_manager_instance.load_state()
+    # --- CORRIGIDO: Instanciar StateManager com 3 argumentos ---
+    _state_manager_instance = StateManager(
+        config.PROCESSED_TOKENS_FILE,
+        config.PENDING_TOKENS_FILE,
+        config.CREATOR_BLACKLIST_FILE # Apenas 3 argumentos
+    )
+    # --- FIM DA CORREÇÃO ---
+    _state_manager_instance.load_state() # Carrega estado
 
     timeout = aiohttp.ClientTimeout(total=config.API_TIMEOUT)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        save_task = asyncio.create_task(
-            _state_manager_instance.run_periodic_save(config.SAVE_INTERVAL_SECONDS),
-            name="PeriodicSaveTask"
-        )
-        websocket_task = asyncio.create_task(
-            run_websocket_client(session, _state_manager_instance),
-            name="WebSocketClientTask"
-        )
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            save_task = asyncio.create_task(_state_manager_instance.run_periodic_save(config.SAVE_INTERVAL_SECONDS), name="SaveTask")
+            websocket_task = asyncio.create_task(run_websocket_client(session, _state_manager_instance), name="WebSocketTask")
+            done, pending = await asyncio.wait({websocket_task, save_task}, return_when=asyncio.FIRST_COMPLETED)
+            if not _shutdown_requested: logger.error("Loop principal terminou inesperadamente.")
+            # ... (processamento de tasks done/pending como antes) ...
+            for task in done:
+                 try: exc=task.exception(); logger.error(f"Task '{task.get_name()}' erro:", exc_info=exc) if exc else logger.info(f"Task '{task.get_name()}' OK.")
+                 except asyncio.CancelledError: logger.info(f"Task '{task.get_name()}' cancelada wait.")
+                 except Exception as e: logger.error(f"Erro check task '{task.get_name()}': {e}", exc_info=True)
+            if pending:
+                 logger.info(f"Cancelando {len(pending)} tarefas..."); [t.cancel() for t in pending if not t.done()]
+                 try: await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=2.0)
+                 except asyncio.TimeoutError: logger.warning("Timeout cancelamento pendentes.")
 
-        all_tasks = {websocket_task, save_task}
-        done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
-
-        if not _shutdown_requested:
-             logger.error("Loop principal terminou inesperadamente. Verificando exceções...")
-
-        for task in done:
-            task_name = task.get_name()
-            try:
-                exc = task.exception()
-                if exc: logger.error(f"Tarefa '{task_name}' finalizada com erro:", exc_info=exc)
-                else: logger.info(f"Tarefa '{task_name}' finalizada sem erros.")
-            except asyncio.CancelledError: logger.info(f"Tarefa '{task_name}' foi cancelada durante wait.")
-            except Exception as e: logger.error(f"Erro ao verificar status tarefa concluída '{task_name}': {e}", exc_info=True)
-
-        if pending:
-            logger.info("Cancelando tarefas pendentes...")
-            for task in pending:
-                task_name = task.get_name()
-                if not task.done():
-                    task.cancel()
-                    try: await asyncio.wait_for(task, timeout=2.0)
-                    except asyncio.CancelledError: logger.debug(f"Tarefa pendente '{task_name}' cancelada.")
-                    except asyncio.TimeoutError: logger.warning(f"Timeout ao esperar cancelamento tarefa '{task_name}'.")
-                    except Exception as e: logger.error(f"Erro durante cancelamento tarefa '{task_name}': {e}", exc_info=True)
+    except aiohttp.ClientError as e: logger.critical(f"Erro ClientSession: {e}")
+    except Exception as e: logger.critical(f"Erro não tratado main: {e}", exc_info=True)
 
 # --- shutdown_handler (sem alterações) ---
 def shutdown_handler(signum, frame):
-    """Handler de sinal para encerramento gracioso."""
+    # (Código como na resposta anterior, incluindo remove_pid_file())
     global _shutdown_requested, _state_manager_instance
-    if _shutdown_requested: logger.debug("Shutdown já em progresso."); return
-    _shutdown_requested = True
-    logger.warning(f"Sinal {signal.Signals(signum).name} recebido. Iniciando encerramento...")
-
+    if _shutdown_requested: logger.debug("Shutdown já progresso."); return
+    _shutdown_requested = True; logger.warning(f"Sinal {signal.Signals(signum).name}. Encerrando...")
     if _state_manager_instance and not _state_manager_instance.is_final_save_done():
         logger.info("Salvando estado final (handler)...")
         try:
-            processed_list = _state_manager_instance.get_processed_tokens_copy()
-            pending_list = _state_manager_instance.get_pending_tokens_copy()
-            processed_file = config.PROCESSED_TOKENS_FILE
-            pending_file = config.PENDING_TOKENS_FILE
-            with open(processed_file, "w") as f: json.dump(processed_list, f, indent=2)
-            with open(pending_file, "w") as f: json.dump(pending_list, f, indent=2)
-            logger.info(f"Salvamento final (handler) OK. Proc: {len(processed_list)}, Pend: {len(pending_list)}")
+            processed=list(_state_manager_instance._processed_tokens); pending=list(_state_manager_instance._pending_tokens)
+            with open(config.PROCESSED_TOKENS_FILE,"w") as f: json.dump(processed,f,indent=2)
+            with open(config.PENDING_TOKENS_FILE,"w") as f: json.dump(pending,f,indent=2)
+            logger.info(f"Salvamento final OK. Proc:{len(processed)}, Pend:{len(pending)}")
             _state_manager_instance.mark_final_save_done()
-        except Exception as e: logger.error(f"Erro salvamento final (handler): {e}", exc_info=True)
-    elif _state_manager_instance and _state_manager_instance.is_final_save_done(): logger.debug("Salvamento final (handler) já realizado.")
-    else: logger.warning("StateManager indisponível no handler, não salvou estado.")
-
-    try:
+        except Exception as e: logger.error(f"Erro salvamento final: {e}", exc_info=True)
+    remove_pid_file() # Tenta remover PID
+    try: # Tenta parar o loop
         loop = asyncio.get_running_loop()
-        async def stop_loop_and_tasks():
-            tasks = [t for t in asyncio.all_tasks(loop=loop) if t is not asyncio.current_task(loop=loop)]
-            if tasks:
-                logger.info(f"Cancelando {len(tasks)} tarefas pendentes...")
-                for task in tasks:
-                    if not task.done(): task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                logger.debug("Gather de cancelamento concluído.")
-            else: logger.info("Nenhuma tarefa pendente para cancelar.")
-            if loop.is_running(): logger.info("Enviando comando loop.stop()."); loop.stop()
-            else: logger.info("Loop não estava rodando ao tentar parar.")
-        loop.call_soon_threadsafe(asyncio.ensure_future, stop_loop_and_tasks())
-    except RuntimeError: logger.error("Nenhum loop de eventos ativo no shutdown handler.")
-
+        async def stop_tasks():
+            tasks = [t for t in asyncio.all_tasks(loop=loop) if t is not asyncio.current_task(loop=loop)]; logger.info(f"Cancelando {len(tasks)} tarefas...")
+            [t.cancel() for t in tasks if not t.done()]; await asyncio.gather(*tasks, return_exceptions=True); logger.debug("Gather cancel OK.")
+            if loop.is_running(): logger.info("Enviando loop.stop()."); loop.stop()
+        asyncio.ensure_future(stop_tasks(), loop=loop)
+    except RuntimeError: logger.error("Nenhum loop ativo no shutdown handler.")
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
-    try:
-        asyncio.run(main())
+    signal.signal(signal.SIGINT, shutdown_handler); signal.signal(signal.SIGTERM, shutdown_handler)
+    try: asyncio.run(main())
     except (KeyboardInterrupt, asyncio.CancelledError): logger.info("Programa interrompido/cancelado.")
-    except SystemExit as e: logger.error(f"Encerrando devido a erro: {e}")
+    except SystemExit as e: logger.error(f"Encerrando: {e}") # Captura exit do config
     except Exception as e: logger.critical(f"Erro fatal não capturado: {e}", exc_info=True)
-    finally: logger.info("Processo de monitoramento formalmente encerrado.")
+    finally: remove_pid_file(); logger.info("Processo monitoramento formalmente encerrado.")
