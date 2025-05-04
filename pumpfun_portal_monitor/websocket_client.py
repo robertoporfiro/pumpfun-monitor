@@ -23,10 +23,9 @@ from .utils import format_analysis_output
 
 logger = logging.getLogger(__name__)
 
-# --- Funções Auxiliares Refatoradas (Versão sem GMGN) ---
-
+# --- Funções Auxiliares ---
 def _validate_incoming_token_data(data: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """Valida os dados iniciais do token recebido via WebSocket."""
+    # (Código como na resposta anterior)
     mint_address = data.get("mint"); signature = data.get("signature", "Desconhecido")
     if not mint_address or not isinstance(mint_address, str) or len(mint_address) not in (43, 44):
         actual_len = len(mint_address) if isinstance(mint_address, str) else 'N/A'
@@ -34,7 +33,6 @@ def _validate_incoming_token_data(data: Dict[str, Any]) -> Tuple[Optional[str], 
     return mint_address, signature
 
 def _calculate_safety_metrics(raw_data_rc: Dict[str, Any], mint_address: str) -> Dict[str, Any]:
-    """Calcula métricas de segurança a partir dos dados RugCheck."""
     # (Código como na resposta anterior)
     metrics = {"mint_address": mint_address, "score_norm": raw_data_rc.get("score_normalised"), "is_rugged": raw_data_rc.get("rugged"),
                "mint_auth_none": raw_data_rc.get("mintAuthority") is None, "freeze_auth_none": raw_data_rc.get("freezeAuthority") is None,
@@ -79,7 +77,6 @@ def _calculate_safety_metrics(raw_data_rc: Dict[str, Any], mint_address: str) ->
     return metrics
 
 def _evaluate_safety_checks(metrics: Dict[str, Any]) -> Tuple[bool, str]:
-    """Avalia filtros de segurança baseados APENAS nas métricas RugCheck."""
     # (Código como na resposta anterior)
     score_ok = (metrics["score_norm"] is not None and isinstance(metrics["score_norm"],(int,float)) and metrics["score_norm"]>=config.MIN_RUGCHECK_SCORE)
     passes = ( metrics["is_rugged"] is False and metrics["mint_auth_none"] is True and metrics["freeze_auth_none"] is True and
@@ -97,7 +94,7 @@ def _evaluate_safety_checks(metrics: Dict[str, Any]) -> Tuple[bool, str]:
                f"RCIns:{metrics['insiders_ok']}{'[OK]' if metrics['insiders_ok'] else '[F]'})" )
     return passes, reason
 
-# --- _handle_safe_token (Chamada Corrigida) ---
+# --- _handle_safe_token (Chamada CORRIGIDA para place_sniperoo_buy_order) ---
 async def _handle_safe_token(mint: str, sig: str, ts_utc: datetime, init_p: Optional[float], ses: aiohttp.ClientSession, st: StateManager):
     """Decide ação para token seguro: AutoBuy ou Monitor."""
     if config.SNIPEROO_USE_AUTOBUY_MODE:
@@ -105,7 +102,7 @@ async def _handle_safe_token(mint: str, sig: str, ts_utc: datetime, init_p: Opti
         cur_p = f"{cur_mkt['price_usd']:.8f}" if cur_mkt and cur_mkt.get('price_usd') else "N/A"
         logger.info(f"[{mint}] Preço DexScreener pré-AutoBuy: {cur_p} USD.")
         logger.info(f"[{mint}] Enviando ordem AutoBuy p/ Sniperoo (Preço Dex: {cur_p})...")
-        # --- CORREÇÃO AQUI: Passa 'mint' como 'mint_address' ---
+        # --- CORREÇÃO: Passa 'mint' como 'mint_address' ---
         buy_ok = await place_sniperoo_buy_order(session=ses, mint_address=mint)
         # --- FIM CORREÇÃO ---
         if buy_ok: logger.info(f"[{mint}] Ordem AutoBuy registrada via Sniperoo.")
@@ -114,8 +111,8 @@ async def _handle_safe_token(mint: str, sig: str, ts_utc: datetime, init_p: Opti
         if init_p is not None and isinstance(init_p, (int, float)) and init_p > 1e-18:
             if mint not in tokens_being_monitored: # Usa set global
                 tokens_being_monitored.add(mint) # Adiciona ao set global
+                await _write_monitored_tokens_file() # Atualiza arquivo
                 logger.info(f"[{mint}] Seg OK. Modo Monitor ATIVO. Iniciando monitor (InitP RC: {init_p:.8f})...")
-                # Passa state para a task poder adicionar a pendentes se necessário
                 asyncio.create_task(monitor_market_activity(mint, float(init_p), ses, st), name=f"MarketMonitor_{mint[:6]}")
             else: logger.debug(f"[{mint}] Já sendo monitorado (set global).")
         else: logger.warning(f"[{mint}] Seg OK (Modo Monitor), mas InitP RC inválido ({init_p}). Ñ monitorando."); st.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": "Seguro(Monitor), InitP inválido"})
@@ -123,73 +120,47 @@ async def _handle_safe_token(mint: str, sig: str, ts_utc: datetime, init_p: Opti
 # --- Função Principal de Processamento (Orquestradora) ---
 async def _process_graduated_token(data: Dict[str, Any], session: aiohttp.ClientSession, state: StateManager):
     """Orquestra o processamento: valida, verifica RugCheck, avalia e decide ação."""
-    # --- Verificação de Horário de Trading ---
+    # --- Verificação de Horário ---
     if not config.TRADING_ENABLED: return
     try:
-        now_struct = time.localtime(); current_hour = now_struct.tm_hour
-        start_h, end_h = config.TRADING_START_HOUR, config.TRADING_END_HOUR
-        if not (start_h <= current_hour < end_h):
-            logger.debug(f"Ignorado: Hora ({current_hour:02d}h {time.strftime('%Z')}) fora janela ({start_h:02d}h-{end_h:02d}h).")
-            return
+        now_struct = time.localtime(); current_hour = now_struct.tm_hour; start_h, end_h = config.TRADING_START_HOUR, config.TRADING_END_HOUR
+        if not (start_h <= current_hour < end_h): logger.debug(f"Ignorado: Hora ({current_hour:02d}h {time.strftime('%Z')}) fora janela ({start_h:02d}h-{end_h:02d}h)."); return
     except Exception as time_err: logger.error(f"Erro verificar horário: {time_err}. Continuando...")
 
     mint, sig = _validate_incoming_token_data(data)
     if not mint: return
     ts_utc = datetime.now(timezone.utc)
-    # --- Usa set global para verificar monitoramento ---
-    if state.is_token_processed(mint) or mint in tokens_being_monitored:
-         logger.debug(f"Token {mint} já visto/monitorado."); return
-    # --------------------------------------------------
+    if state.is_token_processed(mint) or mint in tokens_being_monitored: logger.debug(f"Token {mint} já visto."); return
 
     state.add_processed_token(mint)
     logger.info(f"\n=== Novo token graduado! ===\n  Endereço: {mint}\n  Assinatura: {sig}\n  Horário UTC: {ts_utc.strftime('%Y-%m-%d %H:%M:%S')}Z\n  Solscan: https://solscan.io/token/{mint}")
 
     rc_result = await check_token_reliability(mint, session)
-
     if rc_result["status"] == "success":
-        analysis_summary = format_analysis_output(mint, rc_result)
+        analysis_summary = format_analysis_output(mint, rc_result) # Sem GMGN
         logger.info(analysis_summary)
         rc_raw = rc_result.get("raw_data")
-        if not rc_raw or not isinstance(rc_raw, dict):
-             logger.error(f"[{mint}] Dados RC ausentes."); state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": "RC OK mas raw_data vazio"}); return
-
+        if not rc_raw or not isinstance(rc_raw, dict): logger.error(f"[{mint}] Dados RC ausentes."); state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": "RC OK mas raw_data vazio"}); return
         creator_address = rc_raw.get("creator")
         if state.is_creator_blacklisted(creator_address):
             logger.warning(f"[{mint}] REJEITADO: Criador {creator_address} na blacklist.")
-            state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"Criador Blacklist: {creator_address}"})
-            return
-
-        try:
-            metrics = _calculate_safety_metrics(rc_raw, mint)
-            passes, reason = _evaluate_safety_checks(metrics)
-        except Exception as e:
-            logger.error(f"[{mint}] Erro métricas: {e}", exc_info=True); state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"Erro métricas: {e}"}); return
-
-        if passes:
-            await _handle_safe_token(mint, sig, ts_utc, metrics.get("initial_price_rugcheck"), session, state)
-        else:
-            logger.info(f"[{mint}] REJEITADO filtros segurança {reason}.")
-            state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"Falhou filtros {reason}"})
-
+            state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"Criador Blacklist: {creator_address}"}); return
+        try: metrics = _calculate_safety_metrics(rc_raw, mint); passes, reason = _evaluate_safety_checks(metrics) # Sem GMGN
+        except Exception as e: logger.error(f"[{mint}] Erro métricas: {e}", exc_info=True); state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"Erro métricas: {e}"}); return
+        if passes: await _handle_safe_token(mint, sig, ts_utc, metrics.get("initial_price_rugcheck"), session, state)
+        else: logger.info(f"[{mint}] REJEITADO filtros segurança {reason}."); state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"Falhou filtros {reason}"})
     elif rc_result["status"] in ["skipped", "timeout", "error"]:
         reason = rc_result.get("reason","?"); status = rc_result.get("status","?")
         logger.warning(f"[{mint}] Falha/Skip RugCheck ({status}): {reason}"); state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"RC API {status}: {reason}"})
-    else:
-         logger.error(f"[{mint}] Status RC inesperado: {rc_result.get('status')}"); state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"Status RC Inesp: {rc_result.get('status')}"})
-
+    else: logger.error(f"[{mint}] Status RC inesperado: {rc_result.get('status')}"); state.add_pending_token({"mint": mint, "sig": sig, "ts": ts_utc.isoformat(), "reason": f"Status RC Inesp: {rc_result.get('status')}"})
 
 # --- _handle_message e run_websocket_client (sem alterações) ---
 async def _handle_message(message: str, session: aiohttp.ClientSession, state: StateManager):
     # (Código como antes)
     try:
         data = json.loads(message)
-        if data.get("txType") == "migrate":
-            logger.debug(f"Msg 'migrate' recebida: {json.dumps(data)}")
-            await _process_graduated_token(data, session, state)
-        else:
-            log_msg = f"Msg ignorada: type={data.get('txType', '?')}"
-            if 'method' in data: log_msg += f", method={data.get('method')}"
-            logger.debug(log_msg)
+        if data.get("txType") == "migrate": logger.debug(f"Msg 'migrate': {json.dumps(data)}"); await _process_graduated_token(data, session, state)
+        else: log_msg = f"Msg ignorada: type={data.get('txType', '?')}"; logger.debug(log_msg + (f", method={data['method']}" if 'method' in data else ""))
     except json.JSONDecodeError: logger.error(f"Erro JSON: {message[:500]}...")
     except Exception as e: logger.error(f"Erro processar msg: {e}", exc_info=True)
 

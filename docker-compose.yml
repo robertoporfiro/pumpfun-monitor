@@ -10,6 +10,8 @@ services:
     # Isso garante que os logs e arquivos JSON persistam entre as reinicializações do container
     volumes:
       - pumpfun_portal_data:/data
+      # Monta o arquivo local no caminho esperado dentro do container
+      - ./creator_blacklist.json:/app/creator_blacklist.json:ro # Monta como read-only
     # Passa as variáveis de ambiente do arquivo .env para o container
     # O arquivo .env deve estar no mesmo diretório que o docker-compose.yml
     env_file:
@@ -24,6 +26,26 @@ services:
       options:
         max-size: "10m" # Tamanho máximo por arquivo de log
         max-file: "3"  # Número máximo de arquivos de log a manter
+
+
+  web:
+    image: bot_manager_web:v1
+    container_name: bot_manager_web
+    # Assume que o Dockerfile e o código da web app estão em /home/ubuntu/bot_manager_web
+    # Ajuste se o seu diretório for diferente
+    build:
+      context: ./bot_manager_web # Ou o caminho relativo correto
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000" # Expõe a porta da web app
+    environment:
+      - BOT_DATA_DIR=/data # Web app lê dados do mesmo diretório
+      - FLASK_ENV=production # Opcional: para rodar Flask em modo produção
+    volumes:
+      - pumpfun_portal_data:/data # Monta o mesmo volume
+    depends_on:
+      - monitor # Garante que o bot tente iniciar primeiro
+    restart: unless-stopped
 
 # Declara o volume nomeado usado pelo serviço 'monitor'
 # O Docker gerenciará este volume.

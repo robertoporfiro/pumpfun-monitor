@@ -71,7 +71,7 @@ def format_analysis_output(mint: str, rugcheck_data: Dict[str, Any]) -> str:
 
     output.append("\n**Checagens de Segurança:**")
     rc_score_ok = score_norm_rc is not None and score_norm_rc >= config.MIN_RUGCHECK_SCORE
-    output.append(f"  - Score Norm OK: {'✅' if rc_score_ok else '❌'} ({score_str_rc} vs {config.MIN_RUGCHECK_SCORE})") # Apenas emoji
+    output.append(f"  - Score Norm OK: {'✅ ' if rc_score_ok else '❌ '} ({score_str_rc} vs {config.MIN_RUGCHECK_SCORE})") # Apenas emoji
     output.append(f"  - Mint Renunciado: {'✅ Sim' if mint_auth_rc is None else '❌ NÃO'}")
     output.append(f"  - Freeze Renunciado: {'✅ Sim' if freeze_auth_rc is None else '❌ NÃO'}")
     output.append(f"  - LP Bloqueada: {'✅ 100%' if lp_locked_pct_rc == 100 else f'⚠️ {lp_locked_pct_rc:.1f}%'}")
@@ -79,7 +79,7 @@ def format_analysis_output(mint: str, rugcheck_data: Dict[str, Any]) -> str:
     else: output.append(f"  - Riscos Contrato: ✅ Nenhum")
     output.append(f"  - Metadados Mutáveis: {'⚠️ Sim' if mutable_rc is True else '✅ Não' if mutable_rc is False else '❔'}")
     ins_ok = insiders_rc <= config.FILTER_MAX_INSIDERS_DETECTED
-    output.append(f"  - Insiders Detectados: {'✅' if ins_ok else '⚠️'} {insiders_rc} (Limite: {config.FILTER_MAX_INSIDERS_DETECTED})") # Apenas emoji
+    output.append(f"  - Insiders Detectados: {'✅ ' if ins_ok else '⚠️ '} {insiders_rc} (Limite: {config.FILTER_MAX_INSIDERS_DETECTED})") # Apenas emoji
 
     output.append("\n**Características e Holders (Dados RugCheck):**")
     output.append(f"  - Nome: {name} ({symbol}) | Criador: {creator_rc}")
@@ -98,10 +98,10 @@ def format_analysis_output(mint: str, rugcheck_data: Dict[str, Any]) -> str:
     # Linha 1: Mostra apenas a soma e a lista dos Top X, e o limite de referência
     output.append(f"  - Concentração (Soma Top {holders_summed} ex-LP/Creator): {holder_concentration_pct:.2f}% [{', '.join(top_non_lp_holders)}] (Limite Holder Único: {config.FILTER_MAX_SINGLE_HOLDER_PCT}%)")
     # Linha 2: Mostra apenas emoji e valor do maior holder único
-    sh_ok = max_single_holder_pct_found <= config.FILTER_MAX_SINGLE_HOLDER_PCT; sh_warn = "✅" if sh_ok else "⚠️"
+    sh_ok = max_single_holder_pct_found <= config.FILTER_MAX_SINGLE_HOLDER_PCT; sh_warn = "✅ " if sh_ok else "⚠️ "
     output.append(f"  - Maior Holder Único (Todos ex-LP/Creator): {sh_warn} {max_single_holder_pct_found:.2f}%")
     # Linha 3: Saldo Criador com emoji
-    cb_ok = creator_holding_pct_calculated <= config.FILTER_MAX_CREATOR_HOLDING_PCT; cb_warn = "✅" if cb_ok else "⚠️"
+    cb_ok = creator_holding_pct_calculated <= config.FILTER_MAX_CREATOR_HOLDING_PCT; cb_warn = "✅ " if cb_ok else "⚠️ "
     output.append(f"  - Saldo Criador: {cb_warn} {creator_holding_pct_calculated:.2f}% (Max: {config.FILTER_MAX_CREATOR_HOLDING_PCT}%)")
     # Linha 4: Alerta de baixa liquidez (mantido)
     if liquidity_rc is not None and liquidity_rc < 10000: output.append(f"    -> ⚠️ BAIXA liquidez (${liquidity_rc:,.2f}).")

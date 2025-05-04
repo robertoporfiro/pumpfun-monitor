@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monitor Bot PumpFun</title> <!-- Título Atualizado -->
+    <style>
+        /* Estilos como antes */
+        body { font-family: sans-serif; padding: 15px; background-color: #1a1a1a; color: #e0e0e0; }
+        .container { background-color: #2b2b2b; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.5); max-width: 800px; margin: auto;}
+        h1, h2 { border-bottom: 1px solid #444; padding-bottom: 5px; color: #00bfff; }
+        #bot-status { font-weight: bold; padding: 3px 8px; border-radius: 4px; color: white; }
+        #token-list { list-style: none; padding: 0; max-height: 300px; overflow-y: auto; background-color: #333; border: 1px solid #444; border-radius: 4px; padding: 10px;}
+        #token-list li { margin-bottom: 8px; font-family: monospace; font-size: 0.9em; word-break: break-all; border-bottom: 1px dashed #555; padding-bottom: 5px; }
+        #token-list li:last-child { border-bottom: none; }
+        #token-list a { color: #7ec0ee; text-decoration: none; } /* Estilo link adicionado */
+        #token-list a:hover { text-decoration: underline; }
+        .status-running { background-color: #28a745; }
+        .status-stopped { background-color: #dc3545; }
+        .status-loading { background-color: #ffc107; color: #333; }
+        .error { color: #ff6b6b; font-style: italic; margin-top: 15px; background-color: #4d2020; padding: 10px; border-radius: 4px; border: 1px solid #8b3a3a; display: none; } /* Escondido por padrão */
+        .loader { font-style: italic; color: #aaa; }
+        .token-count { font-size: 0.8em; color: #ccc; margin-left: 10px; }
+        #pid-info { font-size: 0.8em; color: #aaa; margin-left: 5px; } /* Estilo para PID */
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1><span style="font-size: 1.5em;">📈</span> Monitor Bot PumpFun</h1> <!-- Título Atualizado -->
+
+        <h2>Estado do Bot</h2>
+        <p>Status: <span id="bot-status" class="status-loading">A carregar...</span> <span id="pid-info"></span></p>
+
+        <h2>Tokens Ativamente Monitorados <span id="token-count" class="token-count"></span></h2>
+        <ul id="token-list">
+            <li class="loader">A carregar...</li>
+        </ul>
+        <p id="error-message" class="error"></p>
+    </div>
+
+    <script>
+        const botStatusSpan = document.getElementById('bot-status');
+        const pidInfoSpan = document.getElementById('pid-info'); // Adicionado
+        const tokenListUl = document.getElementById('token-list');
+        const errorMessageP = document.getElementById('error-message');
+        const tokenCountSpan = document.getElementById('token-count');
+        let lastMonitoredTokens = [];
+
+        async function fetchStatus() {
+            // Esconder/limpar erro antigo
+            errorMessageP.textContent = '';
+            errorMessageP.style.display = 'none';
+
+            try {
+                console.log("Fetching /api/status..."); // Log para Console
+                const response = await fetch('/api/status');
+
+                console.log("Response received, status:", response.status); // Log para Console
+
+                if (!response.ok) {
+                     let errorText = `Erro HTTP: ${response.status} ${response.statusText}`;
+                     try {
+                         const errorData = await response.json();
+                         if (errorData && errorData.error) errorText += ` - ${errorData.error}`;
+                     } catch (e) {}
+                    throw new Error(errorText);
+                }
+
+                const data = await response.json();
+                console.log("Data received:", data); // Log para Console
+
+                // Atualiza Status
+                botStatusSpan.textContent = data.is_running ? 'A Correr' : 'Parado';
+                botStatusSpan.className = data.is_running ? 'status-running' : 'status-stopped';
+                pidInfoSpan.textContent = data.pid ? `(PID: ${data.pid})` : ''; // Atualiza PID
+
+                // Atualiza Lista de Tokens
+                const currentTokens = data.monitored_tokens || [];
+                tokenListUl.innerHTML = ''; // Limpa
+                if (currentTokens.length > 0) {
+                    currentTokens.forEach(token => {
+                        const li = document.createElement('li');
+                        const link = document.createElement('a');
+                        link.href = `https://solscan.io/token/${token}`;
+                        link.textContent = token;
+                        link.target = "_blank";
+                        li.appendChild(link);
+                        tokenListUl.appendChild(li);
+                    });
+                } else {
+                    const li = document.createElement('li');
+                    li.textContent = data.is_running ? 'Nenhum token a ser monitorado.' : 'Bot parado.';
+                    li.className = 'loader';
+                    tokenListUl.appendChild(li);
+                }
+                lastMonitoredTokens = currentTokens;
+                tokenCountSpan.textContent = `(${currentTokens.length})`;
+
+                // Mostra erro do backend se houver
+                if (data.error) {
+                    errorMessageP.textContent = `Erro backend: ${data.error}`;
+                    errorMessageP.style.display = 'block';
+                }
+
+            } catch (error) {
+                console.error('Erro na função fetchStatus:', error); // Log erro detalhado
+                botStatusSpan.textContent = 'Erro';
+                botStatusSpan.className = 'status-stopped';
+                pidInfoSpan.textContent = '';
+                tokenListUl.innerHTML = '<li class="loader">Erro carregar dados.</li>';
+                tokenCountSpan.textContent = '(?)';
+                errorMessageP.textContent = `Falha comunicação backend: ${error.message}.`;
+                errorMessageP.style.display = 'block';
+            }
+        }
+
+        // Busca inicial e polling
+        console.log("Iniciando fetchStatus inicial e setInterval"); // Log para Console
+        fetchStatus();
+        setInterval(fetchStatus, 5000);
+    </script>
+</body>
+</html>
