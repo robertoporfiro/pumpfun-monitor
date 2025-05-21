@@ -79,94 +79,233 @@ def _parse_market_data_from_pair(pair_data: Dict[str, Any], mint_address: str) -
 
 async def fetch_market_data(mint: str, ses: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
     """Busca e processa dados de mercado recentes da API DexScreener."""
-    # --- CORPO DA FUNÇÃO INDENTADO ---
-    url=f"https://api.dexscreener.com/latest/dex/tokens/{mint}"; logger.debug(f"[{mint}] Fetching Dex: {url}")
+    url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+    logger.debug(f"[{mint}] Fetching Dex: {url}")
+    
     try:
-        async with ses.get(url, timeout=aiohttp.ClientTimeout(total=config.API_TIMEOUT)) as resp:
-            st=resp.status; txt=await resp.text(); logger.debug(f"[{mint}] Dex status: {st}")
-            if st==200:
-                try: data=json.loads(txt)
-                except json.JSONDecodeError as e: logger.error(f"[{mint}] Erro JSON Dex: {e}. Resp:{txt[:500]}"); return None
-                pairs=data.get("pairs");
-                if not pairs or not isinstance(pairs, list): logger.warning(f"[{mint}] Campo 'pairs' inválido Dex: {data}"); return None
-                target=_find_target_pair(pairs, mint); return _parse_market_data_from_pair(target, mint) if target else None
-            elif st==404: logger.warning(f"[{mint}] Token não encontrado Dex (404)."); return None
-            elif st==429: logger.warning(f"[{mint}] Rate limit Dex (429)."); return None
-            else: logger.error(f"[{mint}] Erro Dex: Status {st}. Resp: {txt[:500]}"); return None
-    except Exception as e: logger.error(f"[{mint}] Exc fetch_market: {type(e).__name__} - {e}", exc_info=(config.LOG_LEVEL_NAME=="DEBUG")); return None
-    # --- FIM DA INDENTAÇÃO CORRETA ---
+        timeout = aiohttp.ClientTimeout(total=config.API_TIMEOUT)
+        async with ses.get(url, timeout=timeout) as resp:
+            status = resp.status
+            text = await resp.text()
+            logger.debug(f"[{mint}] Dex status: {status}")
+            
+            if status == 200:
+                try:
+                    data = json.loads(text)
+                except json.JSONDecodeError as e:
+                    logger.error(f"[{mint}] Erro JSON Dex: {e}. Resp:{text[:500]}")
+                    return None
+                
+                pairs = data.get("pairs")
+                if not pairs or not isinstance(pairs, list):
+                    logger.warning(f"[{mint}] Campo 'pairs' inválido Dex: {data}")
+                    return None
+                
+                if not pairs:
+                    logger.warning(f"[{mint}] Nenhum par encontrado na DexScreener")
+                    return None
+                
+                target = _find_target_pair(pairs, mint)
+                if not target:
+                    logger.warning(f"[{mint}] Nenhum par alvo encontrado na DexScreener")
+                    return None
+                
+                market_data = _parse_market_data_from_pair(target, mint)
+                if not market_data:
+                    logger.warning(f"[{mint}] Falha ao extrair dados de mercado do par alvo")
+                    return None
+                
+                return market_data
+                
+            elif status == 404:
+                logger.warning(f"[{mint}] Token não encontrado Dex (404)")
+                return None
+            elif status == 429:
+                logger.warning(f"[{mint}] Rate limit Dex (429)")
+                return None
+            else:
+                logger.error(f"[{mint}] Erro Dex: Status {status}. Resp: {text[:500]}")
+                return None
+                
+    except asyncio.TimeoutError:
+        logger.error(f"[{mint}] Timeout ao buscar dados Dex")
+        return None
+    except aiohttp.ClientError as e:
+        logger.error(f"[{mint}] Erro de conexão Dex: {type(e).__name__} - {e}")
+        return None
+    except Exception as e:
+        logger.error(f"[{mint}] Erro inesperado fetch_market: {type(e).__name__} - {e}", 
+                    exc_info=(config.LOG_LEVEL_NAME=="DEBUG"))
+        return None
 
 def _check_market_criteria(m: Dict[str, Any], init_p: float, mint: str, i: int) -> Tuple[bool, str]:
     """Avalia se os dados de mercado atuais atendem aos critérios de compra definidos."""
-    # --- CORPO DA FUNÇÃO INDENTADO ---
-    p_ok=m["price_usd"]>=init_p*(1.0-config.MARKET_PRICE_DROP_TOLERANCE); v_ok=m["volume_m5"]>=config.MARKET_MIN_VOLUME_M5
-    b_ok=m["buys_m5"]>=config.MARKET_MIN_BUYS_M5; total_tx=m["buys_m5"]+m["sells_m5"]
-    br_ok=(m["buys_m5"]/total_tx>=config.MARKET_MIN_BUY_SELL_RATIO) if total_tx>5 else True
-    fdv_ok=m["fdv"]<config.MARKET_MAX_FDV; h1_ok=m["price_change_h1"]>=config.MARKET_MIN_H1_PRICE_CHANGE
-    log=(f"  P:{m['price_usd']:.6f}(>{init_p*(1.0-config.MARKET_PRICE_DROP_TOLERANCE):.6f})->{'OK' if p_ok else 'F'}|"
-         f"V5m:{m['volume_m5']/1000:.1f}k(>{config.MARKET_MIN_VOLUME_M5/1000:.0f}k)->{'OK' if v_ok else 'F'}|"
-         f"B5m:{m['buys_m5']}(>{config.MARKET_MIN_BUYS_M5})->{'OK' if b_ok else 'F'}|"
-         f"B/S:{(m['buys_m5']/total_tx*100) if total_tx>0 else 0:.0f}%(>{config.MARKET_MIN_BUY_SELL_RATIO*100:.0f}%)->{'OK' if br_ok else 'F'}|"
-         f"FDV:{m['fdv']/1000:.1f}k(<{config.MARKET_MAX_FDV/1000:.0f}k)->{'OK' if fdv_ok else 'F'}|"
-         f"H1%:{m['price_change_h1']:.1f}%(>{config.MARKET_MIN_H1_PRICE_CHANGE:.1f}%)->{'OK' if h1_ok else 'F'}")
-    logger.debug(f"[{mint}] Check (Iter {i}):{log}")
-    return (p_ok and v_ok and b_ok and br_ok and fdv_ok and h1_ok), log
-    # --- FIM DA INDENTAÇÃO CORRETA ---
+    criteria = {
+        "price": {
+            "value": m["price_usd"],
+            "min": init_p * (1.0 - config.MARKET_PRICE_DROP_TOLERANCE),
+            "ok": m["price_usd"] >= init_p * (1.0 - config.MARKET_PRICE_DROP_TOLERANCE)
+        },
+        "volume": {
+            "value": m["volume_m5"],
+            "min": config.MARKET_MIN_VOLUME_M5,
+            "ok": m["volume_m5"] >= config.MARKET_MIN_VOLUME_M5
+        },
+        "buys": {
+            "value": m["buys_m5"],
+            "min": config.MARKET_MIN_BUYS_M5,
+            "ok": m["buys_m5"] >= config.MARKET_MIN_BUYS_M5
+        },
+        "buy_sell_ratio": {
+            "value": m["buys_m5"] / (m["buys_m5"] + m["sells_m5"]) if (m["buys_m5"] + m["sells_m5"]) > 5 else 1.0,
+            "min": config.MARKET_MIN_BUY_SELL_RATIO,
+            "ok": (m["buys_m5"] / (m["buys_m5"] + m["sells_m5"]) >= config.MARKET_MIN_BUY_SELL_RATIO) if (m["buys_m5"] + m["sells_m5"]) > 5 else True
+        },
+        "fdv": {
+            "value": m["fdv"],
+            "max": config.MARKET_MAX_FDV,
+            "ok": m["fdv"] < config.MARKET_MAX_FDV
+        },
+        "price_change": {
+            "value": m["price_change_h1"],
+            "min": config.MARKET_MIN_H1_PRICE_CHANGE,
+            "ok": m["price_change_h1"] >= config.MARKET_MIN_H1_PRICE_CHANGE
+        }
+    }
+    
+    # Build log message
+    log_parts = []
+    for name, data in criteria.items():
+        if name == "buy_sell_ratio":
+            value_str = f"{data['value']*100:.0f}%"
+            min_str = f"{data['min']*100:.0f}%"
+        elif name in ["volume", "fdv"]:
+            value_str = f"${data['value']/1000:.1f}k"
+            min_str = f"${data['min']/1000:.0f}k" if name == "volume" else f"${data['max']/1000:.0f}k"
+        else:
+            value_str = f"{data['value']:.6f}" if name == "price" else f"{data['value']:.1f}"
+            min_str = f"{data['min']:.6f}" if name == "price" else f"{data['min']:.1f}"
+        
+        log_parts.append(f"{name}:{value_str}(>{min_str})->{'OK' if data['ok'] else 'F'}")
+    
+    log = " | ".join(log_parts)
+    logger.debug(f"[{mint}] Check (Iter {i}): {log}")
+    
+    # All criteria must be met
+    return all(data["ok"] for data in criteria.values()), log
 
 # --- monitor_market_activity (Usa set global e escreve arquivo) ---
 async def monitor_market_activity(mint_address: str, initial_price: float, session: aiohttp.ClientSession, state: StateManager):
     """Monitora a atividade de mercado e dispara compra se os critérios forem atendidos."""
-    # --- CORPO DA FUNÇÃO INDENTADO ---
-    start_time = time.monotonic(); deadline = start_time + config.MARKET_MONITOR_DURATION
+    start_time = time.monotonic()
+    deadline = start_time + config.MARKET_MONITOR_DURATION
+    
     logger.info(f"[{mint_address}] Iniciando monitor (Dur: {config.MARKET_MONITOR_DURATION}s, Int: {config.MARKET_POLL_INTERVAL}s, InitP: {initial_price:.8f})")
+    
+    # Initial random delay to avoid thundering herd
     await asyncio.sleep(random.uniform(3, 7))
-
+    
     try:
-        errors = 0; max_errors = 5; i = 0; buy_attempted = False; last_log = ""; criteria_met = False
+        errors = 0
+        max_errors = 5
+        iteration = 0
+        buy_attempted = False
+        last_log = ""
+        criteria_met = False
+        
         while time.monotonic() < deadline and not buy_attempted:
-            i += 1; current_task = asyncio.current_task()
+            iteration += 1
+            current_task = asyncio.current_task()
+            
+            # Check if monitoring should be stopped
             if mint_address not in tokens_being_monitored or getattr(current_task, '_must_cancel', False):
-                 logger.info(f"[{mint_address}] Monitoramento interrompido."); break
-            if i > 1:
-                 try: await asyncio.sleep(config.MARKET_POLL_INTERVAL)
-                 except asyncio.CancelledError: logger.info(f"[{mint_address}] Sleep cancelado."); break
-
-            logger.debug(f"[{mint_address}] Iteração {i} monitor...")
+                logger.info(f"[{mint_address}] Monitoramento interrompido.")
+                break
+            
+            # Sleep between iterations (except first)
+            if iteration > 1:
+                try:
+                    await asyncio.sleep(config.MARKET_POLL_INTERVAL)
+                except asyncio.CancelledError:
+                    logger.info(f"[{mint_address}] Sleep cancelado.")
+                    break
+            
+            logger.debug(f"[{mint_address}] Iteração {iteration} monitor...")
+            
+            # Fetch market data
             mkt_data = await fetch_market_data(mint_address, session)
             if mkt_data:
-                errors = 0
-                try: criteria_met, last_log = _check_market_criteria(mkt_data, initial_price, mint_address, i)
-                except Exception as e: logger.error(f"[{mint_address}] Erro check critérios (Iter {i}): {e}", exc_info=True); criteria_met = False
+                errors = 0  # Reset error counter on successful fetch
+                
+                try:
+                    criteria_met, last_log = _check_market_criteria(mkt_data, initial_price, mint_address, iteration)
+                except Exception as e:
+                    logger.error(f"[{mint_address}] Erro check critérios (Iter {iteration}): {e}", exc_info=True)
+                    criteria_met = False
+                
                 if criteria_met:
-                    logger.info(f"[{mint_address}] CRITÉRIOS ATINGIDOS (Iter {i})! Enviando ordem Sniperoo...")
+                    logger.info(f"[{mint_address}] CRITÉRIOS ATINGIDOS (Iter {iteration})! Enviando ordem Sniperoo...")
                     buy_attempted = True
-                    buy_ok = await place_sniperoo_buy_order(session=session, mint_address=mint_address) # Chamada correta
-                    if buy_ok: logger.info(f"[{mint_address}] Ordem IMEDIATA enviada. Encerrando monitor.")
+                    
+                    # Attempt to place buy order
+                    buy_ok = await place_sniperoo_buy_order(session=session, mint_address=mint_address)
+                    
+                    if buy_ok:
+                        logger.info(f"[{mint_address}] Ordem IMEDIATA enviada. Encerrando monitor.")
                     else:
                         logger.warning(f"[{mint_address}] Falha envio ordem IMEDIATA. Encerrando monitor.")
-                        try: state.add_pending_token({"mint": mint_address, "ts": datetime.now(timezone.utc).isoformat(),"reason": f"Critérios OK, falha envio Sniperoo", "market_data": mkt_data, "criteria_log": last_log})
-                        except Exception as se: logger.error(f"[{mint_address}] Erro add pending: {se}")
-                    break # Sai do loop
-                else: logger.debug(f"[{mint_address}] Critérios não atingidos (Iter {i}).")
-            else: # Falha fetch
-                errors += 1; logger.warning(f"[{mint_address}] Falha fetch Dex ({errors}/{max_errors}).")
-                if errors >= max_errors:
-                    logger.error(f"[{mint_address}] Desistindo monitor - {max_errors} erros Dex.");
-                    try: state.add_pending_token({"mint": mint_address, "ts": datetime.now(timezone.utc).isoformat(),"reason": f"{max_errors} erros Dex"})
-                    except Exception as se: logger.error(f"[{mint_address}] Erro add pending: {se}")
+                        try:
+                            state.add_pending_token({
+                                "mint": mint_address,
+                                "ts": datetime.now(timezone.utc).isoformat(),
+                                "reason": "Critérios OK, falha envio Sniperoo",
+                                "market_data": mkt_data,
+                                "criteria_log": last_log
+                            })
+                        except Exception as se:
+                            logger.error(f"[{mint_address}] Erro add pending: {se}")
                     break
-        if time.monotonic() >= deadline and not buy_attempted: logger.info(f"[{mint_address}] Timeout monitor ({config.MARKET_MONITOR_DURATION}s) sem critérios.")
-    except asyncio.CancelledError: logger.info(f"[{mint_address}] Tarefa monitoramento cancelada.")
+                else:
+                    logger.debug(f"[{mint_address}] Critérios não atingidos (Iter {iteration}).")
+            else:
+                # Handle fetch failure
+                errors += 1
+                logger.warning(f"[{mint_address}] Falha fetch Dex ({errors}/{max_errors}).")
+                
+                if errors >= max_errors:
+                    logger.error(f"[{mint_address}] Desistindo monitor - {max_errors} erros Dex.")
+                    try:
+                        state.add_pending_token({
+                            "mint": mint_address,
+                            "ts": datetime.now(timezone.utc).isoformat(),
+                            "reason": f"{max_errors} erros Dex"
+                        })
+                    except Exception as se:
+                        logger.error(f"[{mint_address}] Erro add pending: {se}")
+                    break
+        
+        if time.monotonic() >= deadline and not buy_attempted:
+            logger.info(f"[{mint_address}] Timeout monitor ({config.MARKET_MONITOR_DURATION}s) sem critérios.")
+            
+    except asyncio.CancelledError:
+        logger.info(f"[{mint_address}] Tarefa monitoramento cancelada.")
     except Exception as e:
         logger.error(f"[{mint_address}] Erro fatal tarefa monitor: {e}", exc_info=True)
-        try: state.add_pending_token({"mint": mint_address, "ts": datetime.now(timezone.utc).isoformat(),"reason": f"Erro monitor: {e}"})
-        except Exception as se: logger.error(f"[{mint_address}] Erro add pending: {se}")
+        try:
+            state.add_pending_token({
+                "mint": mint_address,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "reason": f"Erro monitor: {e}"
+            })
+        except Exception as se:
+            logger.error(f"[{mint_address}] Erro add pending: {se}")
     finally:
+        # Cleanup
         was_present = mint_address in tokens_being_monitored
         tokens_being_monitored.discard(mint_address)
-        if was_present: await _write_monitored_tokens_file()
+        if was_present:
+            await _write_monitored_tokens_file()
         logger.debug(f"[{mint_address}] Removido monitor ativo (finally).")
-    # --- FIM DA INDENTAÇÃO CORRETA ---
 
 # --- _build_sniperoo_payload (Definição Corrigida) ---
 def _build_sniperoo_payload(mint_address: str) -> Optional[Dict[str, Any]]:
@@ -204,33 +343,107 @@ def _build_sniperoo_payload(mint_address: str) -> Optional[Dict[str, Any]]:
 # --- place_sniperoo_buy_order (Definição Corrigida) ---
 async def place_sniperoo_buy_order(session: aiohttp.ClientSession, mint_address: str) -> bool:
     """Envia uma ordem de compra para a Sniperoo API."""
-    # --- CORPO DA FUNÇÃO INDENTADO ---
-    payload = _build_sniperoo_payload(mint_address);
+    payload = _build_sniperoo_payload(mint_address)
     if not payload: return False
-    end=config.SNIPEROO_BUY_ENDPOINT; key=config.SNIPEROO_API_KEY; auto_buy=config.SNIPEROO_USE_AUTOBUY_MODE
-    h={"Authorization": f"Bearer {key}","Content-Type":"application/json","Accept":"application/json"}
-    try:
-        log_act = "Registrando AutoBuy" if auto_buy else "Enviando Compra IMEDIATA"
-        logger.info(f"[{mint_address}] {log_act} p/ Sniperoo: {config.SNIPEROO_BUY_AMOUNT_SOL:.4f} SOL (Fee:{config.SNIPEROO_PRIORITY_FEE}, Slip:{config.SNIPEROO_SLIPPAGE_BPS} BPS)")
-        logger.debug(f"Payload Sniperoo: {json.dumps(payload)}")
-        tout = aiohttp.ClientTimeout(total=config.API_TIMEOUT + 15)
-        async with session.post(end, json=payload, headers=h, timeout=tout) as resp:
-            stat=resp.status; txt=await resp.text()
-            try: data = json.loads(txt) if txt else {}
-            except json.JSONDecodeError: logger.error(f"[{mint_address}] Resp inválida Sniperoo(ñ JSON). Stat:{stat}, URL:{end}, Resp:{txt[:500]}"); return False
-            if 200 <= stat < 300:
-                order_info=data.get("order", data); oid="N/A"
-                if isinstance(order_info, dict): oid=order_info.get("orderId", order_info.get("id"))
-                elif isinstance(data, dict): oid=data.get("orderId", data.get("id"))
-                log_ok = "Ordem AutoBuy registrada" if auto_buy else "Ordem compra enviada"
-                logger.info(f"[{mint_address}] {log_ok} c/ sucesso! ID:{oid}. Resp:{json.dumps(data)}"); return True
-            else:
-                err_msg="Erro"; err_det=data.get("error"); msg=data.get("message")
-                if isinstance(err_det, dict): err_msg = err_det.get("message", json.dumps(err_det))
-                elif isinstance(err_det, str): err_msg = err_det
-                elif msg: err_msg = msg
-                elif txt: err_msg = txt[:500]
-                else: err_msg = json.dumps(data)
-                logger.error(f"[{mint_address}] Erro envio/registro Sniperoo. Stat:{stat}, URL:{end}, Erro:{err_msg}"); return False
-    except Exception as e: logger.error(f"[{mint_address}] Exc place_sniperoo_buy_order: {type(e).__name__}. URL:{end}", exc_info=(config.LOG_LEVEL_NAME=="DEBUG")); return False
-    # --- FIM DA INDENTAÇÃO CORRETA ---
+    
+    endpoint = config.SNIPEROO_BUY_ENDPOINT
+    api_key = config.SNIPEROO_API_KEY
+    auto_buy = config.SNIPEROO_USE_AUTOBUY_MODE
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    # Retry configuration from config
+    max_retries = config.SNIPEROO_MAX_RETRIES
+    base_delay = 2  # seconds
+    max_delay = 10  # seconds
+    
+    # Non-retryable status codes
+    non_retryable_status_codes = {400, 401, 403, 404, 422}
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                logger.info(f"[{mint_address}] Tentativa {attempt + 1}/{max_retries} após {delay:.1f}s...")
+                await asyncio.sleep(delay)
+            
+            log_action = "Registrando AutoBuy" if auto_buy else "Enviando Compra IMEDIATA"
+            logger.info(f"[{mint_address}] {log_action} p/ Sniperoo: {config.SNIPEROO_BUY_AMOUNT_SOL:.4f} SOL (Fee:{config.SNIPEROO_PRIORITY_FEE}, Slip:{config.SNIPEROO_SLIPPAGE_BPS} BPS)")
+            logger.debug(f"Payload Sniperoo: {json.dumps(payload)}")
+            
+            timeout = aiohttp.ClientTimeout(total=config.API_TIMEOUT + 15)
+            async with session.post(endpoint, json=payload, headers=headers, timeout=timeout) as resp:
+                status = resp.status
+                text = await resp.text()
+                
+                try:
+                    data = json.loads(text) if text else {}
+                except json.JSONDecodeError:
+                    logger.error(f"[{mint_address}] Resposta inválida Sniperoo (não-JSON). Status:{status}, URL:{endpoint}, Resp:{text[:500]}")
+                    if attempt < max_retries - 1 and status not in non_retryable_status_codes:
+                        continue
+                    return False
+                
+                if 200 <= status < 300:
+                    order_info = data.get("order", data)
+                    order_id = "N/A"
+                    if isinstance(order_info, dict):
+                        order_id = order_info.get("orderId", order_info.get("id"))
+                    elif isinstance(data, dict):
+                        order_id = data.get("orderId", data.get("id"))
+                    
+                    log_success = "Ordem AutoBuy registrada" if auto_buy else "Ordem compra enviada"
+                    logger.info(f"[{mint_address}] {log_success} com sucesso! ID:{order_id}. Resp:{json.dumps(data)}")
+                    return True
+                else:
+                    # Extract error message
+                    error_msg = "Erro"
+                    error_details = data.get("error")
+                    message = data.get("message")
+                    
+                    if isinstance(error_details, dict):
+                        error_msg = error_details.get("message", json.dumps(error_details))
+                        logger.error(f"[{mint_address}] Detalhes erro Sniperoo: {json.dumps(error_details, indent=2)}")
+                    elif isinstance(error_details, str):
+                        error_msg = error_details
+                    elif message:
+                        error_msg = message
+                    elif text:
+                        error_msg = text[:500]
+                    else:
+                        error_msg = json.dumps(data)
+                    
+                    logger.error(f"[{mint_address}] Erro envio/registro Sniperoo. Status:{status}, URL:{endpoint}, Erro:{error_msg}")
+                    logger.debug(f"[{mint_address}] Headers resposta Sniperoo: {dict(resp.headers)}")
+                    
+                    # Don't retry on certain status codes
+                    if status in non_retryable_status_codes:
+                        logger.error(f"[{mint_address}] Erro {status} - não tentando novamente")
+                        return False
+                    
+                    if attempt < max_retries - 1:
+                        continue
+                    return False
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"[{mint_address}] Timeout na requisição Sniperoo")
+            if attempt < max_retries - 1:
+                continue
+            return False
+        except aiohttp.ClientError as e:
+            logger.error(f"[{mint_address}] Erro de conexão Sniperoo: {type(e).__name__} - {e}")
+            if attempt < max_retries - 1:
+                continue
+            return False
+        except Exception as e:
+            logger.error(f"[{mint_address}] Erro inesperado place_sniperoo_buy_order: {type(e).__name__}. URL:{endpoint}", 
+                        exc_info=(config.LOG_LEVEL_NAME=="DEBUG"))
+            if attempt < max_retries - 1:
+                continue
+            return False
+    
+    logger.error(f"[{mint_address}] Todas as {max_retries} tentativas falharam")
+    return False
